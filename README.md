@@ -1,43 +1,49 @@
 # Mini URL Shortener
 
-A small URL shortener built incrementally to demonstrate system design concepts in
-practice — networking, scaling, load balancing, caching, indexing, and more.
+A URL shortener built incrementally to test specific system-design hypotheses.
+Not just CRUD — every layer is added with a measurement attached.
 
-This is a **learning project**. Each session adds one production-grade layer and
-shows the concept in action.
+**Stack:** Python 3.12 / FastAPI / PostgreSQL 16 / Redis 7 / nginx / Docker Compose.
 
-## Architecture (target)
+## Architecture
 
 ```
-  Browser / curl
-       |
-       v   HTTPS
-   [ nginx ]                <- reverse proxy + L7 LB + TLS
-       |
-       v   HTTP, round-robin
-[ FastAPI x3 ]              <- horizontally-scaled stateless backends
-       |
-       v
-   [ Redis ]                <- cache (cache-aside)
-       |
-       v   on miss
-  [ Postgres ]              <- source of truth + index experiment
+   curl / browser
+        |
+        v   HTTP :8000
+   [   nginx   ]                <-  L7 reverse proxy, round-robin LB
+        |
+        v   round-robin
+[ app-1, app-2, app-3 ]         <-  3 stateless FastAPI backends
+        |
+        +-----------+
+        |           |
+        v           v
+   [  Redis  ]   [ Postgres ]   <-  shared cache + source of truth
 ```
 
-## Where we are now
+## Latency ladder (measured, not guessed)
 
-**Day 3 build — Postgres (with index) + Redis cache.**
+| Iteration | p50 redirect latency | DB load per redirect |
+|-----------|---------------------:|----------------------|
+| Day 1 — no index, no cache | ~32 ms | full table scan + UPDATE |
+| Day 2 — added unique B-tree index on `short_code` | ~7-13 ms | indexed scan + UPDATE |
+| Day 3 — added Redis cache + `INCR` counter | **~1.8 ms** | **0 on hot path** |
 
-- `POST /shorten` -> creates a short code, pre-warms Redis cache
-- `GET  /{code}` -> cache-aside lookup; `INCR` on a Redis counter; **never touches Postgres on the hot path**
-- `GET  /health` -> liveness probe
-- `GET  /stats/{code}` -> combines Postgres count + Redis pending count (true total)
-- `POST /admin/flush-hits` -> sweeps Redis counters into Postgres in a batch
+Each iteration is documented end-to-end in [`/experiments`](experiments/):
+- [`01-indexing.md`](experiments/01-indexing.md) — `Seq Scan` 12.7ms → `Index Scan` 0.1ms (~125× DB-level speedup) on a 500K-row table.
+- [`02-redis-cache.md`](experiments/02-redis-cache.md) — cache-aside + `INCR` + atomic `GETDEL` flush; 100 redirects, zero Postgres writes on the hot path.
+- [`03-horizontal-scaling.md`](experiments/03-horizontal-scaling.md) — 30 requests → 10/10/10 round-robin; one backend killed → traffic rebalances; client sees no errors.
 
-Redirects now serve in **~1-2 ms** (cache hit) vs ~7-13 ms before (indexed Postgres) vs ~32 ms before that (full table scan).
-See [experiments/01-indexing.md](experiments/01-indexing.md) and
-[experiments/02-redis-cache.md](experiments/02-redis-cache.md) for the
-before/after measurements.
+## Endpoints
+
+| Method | Path                  | Purpose                                                         |
+|--------|-----------------------|-----------------------------------------------------------------|
+| POST   | `/shorten`            | Create a short code; pre-warms Redis cache.                     |
+| GET    | `/{code}`             | 301 redirect; cache-aside lookup, `INCR` for hit count.         |
+| GET    | `/health`             | Liveness probe (used by nginx for passive health checks).       |
+| GET    | `/stats/{code}`       | Hit count: combines Postgres (flushed) + Redis (pending).       |
+| POST   | `/admin/flush-hits`   | Move accumulated Redis counters into Postgres in a batch.       |
 
 ## Run locally
 
@@ -72,7 +78,8 @@ curl -X POST http://localhost:8000/admin/flush-hits
 | 1 | Postgres + 1 FastAPI | Stateless backend, basic CRUD | done |
 | 2 | The index experiment | Full table scan -> indexed lookup speedup | done |
 | 3 | Redis cache + INCR + flush | Cache-aside, write-back counters | done |
-| 4 | nginx + 3 FastAPI instances | L7 reverse proxy + horizontal scaling + LB | next |
+| 4 | nginx + 3 FastAPI backends | L7 reverse proxy + horizontal scaling + LB | done |
 | 5 | Rate limiting + idempotency keys | API gateway patterns | |
-| 6 | TLS via self-signed cert | TLS handshake observable in `curl -v` | |
-| 7 | Health probes + graceful shutdown | LB health checks, rolling deploys | |
+| 6 | Cache stampede + single-flight | Failure modes you've designed against | |
+| 7 | TLS via self-signed cert | TLS handshake observable in `curl -v` | |
+| 8 | Health/readiness split + graceful shutdown | K8s-grade probes | |
