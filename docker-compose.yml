@@ -16,15 +16,28 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"          # 6380 on host to avoid colliding with iproxy-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
   app:
     build: ./app
     environment:
       DATABASE_URL: postgresql://shortener:shortener@db:5432/shortener
+      REDIS_URL: redis://redis:6379/0
       APP_ID: app-1
     ports:
       - "8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./app:/code
