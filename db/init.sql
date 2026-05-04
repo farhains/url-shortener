@@ -1,6 +1,4 @@
 -- Mini URL Shortener — schema
--- IMPORTANT: short_code is intentionally NOT indexed yet.
--- We will add the index later and measure the speedup. That's the experiment.
 
 CREATE TABLE urls (
     id          BIGSERIAL PRIMARY KEY,
@@ -10,6 +8,9 @@ CREATE TABLE urls (
     hit_count   BIGINT NOT NULL DEFAULT 0
 );
 
--- We deliberately do NOT add an index on short_code here.
--- Lookup queries (WHERE short_code = ?) will do a full table scan.
--- Run `EXPLAIN ANALYZE` to see this in action.
+-- Unique B-tree index on short_code.
+-- Two reasons:
+--   1. Lookups by short_code (WHERE short_code = ?) become O(log n) instead of full table scan.
+--   2. Enforces uniqueness so the collision-retry loop in shorten() actually triggers.
+-- See experiments/01-indexing.md for the before/after measurements that motivated this.
+CREATE UNIQUE INDEX idx_urls_short_code ON urls(short_code);
